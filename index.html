@@ -1,7 +1,184 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox Subscription Review</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; line-height: 1.45; margin: 2rem auto; max-width: 58rem; padding: 0 1rem; }
+    input { font: inherit; padding: .45rem; width: min(100%, 34rem); } button { font: inherit; margin: .35rem .35rem .35rem 0; padding: .45rem .7rem; }
+    .card { border: 1px solid #bbb; border-radius: .4rem; margin: 1rem 0; padding: 1rem; } .muted { color: #555; }
+    .warning { background: #fff4d6; border-left: 4px solid #b7791f; padding: .75rem; } .hidden { display: none; }
+    .result { margin-top: 1rem; white-space: pre-wrap; }
+  </style>
+</head>
 <body>
-<h1>Responsible @mentions in Chat Apps</h1>
-<p>Please use good judgement when @mentioning a person, or using @Everyone in a chat. Direct @mentions can imply urgency, importance, or direct asks in order to draw one's attention away from other chats, email, or communications. @Everyone also implies a sense or heightened prioritization or urgency for an entire group to review. @mentions are devalued when they are over-used or not used with proper priority in mind. Thank you for being selective in your future use!</p>
+  <h1>Inbox Subscription Review</h1>
+  <p class="warning">This page reads your mail only after you sign in. It never deletes mail without a separate confirmation and Microsoft permission; deletion moves mail to <strong>Deleted Items</strong>, where it can be recovered.</p>
+  <section id="setup">
+    <p>Enter the Application (client) ID for a Microsoft Entra app registered as a single-page application with this page’s URL as a redirect URI. No client secret is used or stored.</p>
+    <label>Microsoft application client ID<br><input id="client-id" autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000"></label><br>
+    <button id="sign-in">Sign in and scan inbox</button>
+  </section>
+  <section id="app" class="hidden">
+    <p id="identity" class="muted"></p>
+    <button id="scan">Scan recent inbox mail</button>
+    <button id="sign-out">Sign out</button>
+    <p id="status" role="status"></p>
+    <div id="results"></div>
+  </section>
+  <script>
+    const graph = "https://graph.microsoft.com/v1.0";
+    const clientIdInput = document.querySelector("#client-id");
+    const setup = document.querySelector("#setup");
+    const app = document.querySelector("#app");
+    const results = document.querySelector("#results");
+    const status = document.querySelector("#status");
+    let token = sessionStorage.getItem("graphToken");
+    let subscriptions = [];
+
+    const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
+    const base64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    async function sha256(value) { return base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))); }
+    function setStatus(message) { status.textContent = message; }
+
+    async function startLogin(scopes) {
+      const clientId = clientIdInput.value.trim();
+      if (!/^[0-9a-f-]{36}$/i.test(clientId)) return setStatus("Enter a valid Microsoft application client ID.");
+      const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+      const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
+      sessionStorage.setItem("pkceVerifier", verifier);
+      sessionStorage.setItem("oauthState", state);
+      sessionStorage.setItem("graphClientId", clientId);
+      const params = new URLSearchParams({
+        client_id: clientId, response_type: "code", redirect_uri: location.href.split("?")[0],
+        response_mode: "query", scope: `openid profile offline_access ${scopes}`, state, code_challenge: await sha256(verifier),
+        code_challenge_method: "S256"
+      });
+      location.assign(`https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}`);
+    }
+
+    async function finishLogin() {
+      const code = new URLSearchParams(location.search).get("code");
+      if (!code) return;
+      const clientId = sessionStorage.getItem("graphClientId");
+      const verifier = sessionStorage.getItem("pkceVerifier");
+      const returnedState = new URLSearchParams(location.search).get("state");
+      if (!clientId || !verifier || returnedState !== sessionStorage.getItem("oauthState")) return setStatus("Sign-in session expired. Please start again.");
+      history.replaceState({}, "", location.pathname);
+      const body = new URLSearchParams({ client_id: clientId, grant_type: "authorization_code", code, redirect_uri: location.href, code_verifier: verifier });
+      const response = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error_description || "Microsoft sign-in failed.");
+      token = data.access_token;
+      sessionStorage.setItem("graphToken", token);
+      sessionStorage.removeItem("pkceVerifier");
+      sessionStorage.removeItem("oauthState");
+    }
+
+    async function graphFetch(path, options = {}) {
+      const response = await fetch(`${graph}${path}`, { ...options, headers: { Authorization: ["Bearer", token].join(" "), ...options.headers } });
+      if (response.status === 204) return null;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || "Microsoft Graph request failed.");
+      return data;
+    }
+
+    function unsubscribeUrl(headers) {
+      const header = headers?.find(item => item.name.toLowerCase() === "list-unsubscribe")?.value || "";
+      return header.match(/<((?:https?):\/\/[^>\s]+)>/i)?.[1] || null;
+    }
+    function isSubscription(message) {
+      const headers = message.internetMessageHeaders || [];
+      return headers.some(item => item.name.toLowerCase() === "list-unsubscribe") ||
+        /\b(unsubscribe|manage (?:your )?preferences|email preferences|mailing list)\b/i.test(message.body?.content || "");
+    }
+    async function scanInbox() {
+      setStatus("Scanning the 250 most recent inbox messages…");
+      results.replaceChildren();
+      let url = `${graph}/me/mailFolders/inbox/messages?$top=50&$select=id,subject,from,receivedDateTime,body,internetMessageHeaders`;
+      const messages = [];
+      while (url && messages.length < 250) {
+        const response = await fetch(url, { headers: { Authorization: ["Bearer", token].join(" ") } });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Could not read inbox.");
+        messages.push(...data.value);
+        url = data["@odata.nextLink"];
+      }
+      const grouped = new Map();
+      for (const message of messages.filter(isSubscription)) {
+        const address = message.from?.emailAddress?.address;
+        if (!address) continue;
+        const item = grouped.get(address) || { address, name: message.from.emailAddress.name || address, messages: [], url: null };
+        item.messages.push(message);
+        item.url ||= unsubscribeUrl(message.internetMessageHeaders);
+        grouped.set(address, item);
+      }
+      subscriptions = [...grouped.values()].sort((a, b) => b.messages.length - a.messages.length);
+      renderSubscriptions(messages.length);
+    }
+    function renderSubscriptions(scanned) {
+      results.replaceChildren();
+      setStatus(`Found ${subscriptions.length} possible subscription sender${subscriptions.length === 1 ? "" : "s"} in ${scanned} recent inbox messages.`);
+      for (const subscription of subscriptions) {
+        const card = document.createElement("article");
+        card.className = "card";
+        const examples = subscription.messages.slice(0, 3).map(message =>
+          `<li>${escapeHtml(message.subject || "(no subject)")} <span class="muted">(${new Date(message.receivedDateTime).toLocaleDateString()})</span></li>`).join("");
+        card.innerHTML = `<h2>${escapeHtml(subscription.name)}</h2><p>${escapeHtml(subscription.address)} · ${subscription.messages.length} matching recent message${subscription.messages.length === 1 ? "" : "s"}</p><ul>${examples}</ul>`;
+        if (subscription.url) {
+          const unsubscribe = document.createElement("button");
+          unsubscribe.textContent = "Open unsubscribe page";
+          unsubscribe.onclick = () => { if (confirm(`Open the unsubscribe page for ${subscription.address}?`)) window.open(subscription.url, "_blank", "noopener"); };
+          card.append(unsubscribe);
+        } else card.insertAdjacentHTML("beforeend", '<p class="muted">No List-Unsubscribe link was supplied. Use the sender’s email or website to unsubscribe.</p>');
+        const remove = document.createElement("button");
+        remove.textContent = "Move all mail from sender to Deleted Items";
+        remove.onclick = () => requestDeletion(subscription);
+        card.append(remove);
+        results.append(card);
+      }
+    }
+    async function requestDeletion(subscription) {
+      if (!confirm(`Request permission to move all mail from ${subscription.address} to Deleted Items? You must confirm again after permission is granted.`)) return;
+      sessionStorage.setItem("deleteSender", subscription.address);
+      await startLogin("Mail.ReadWrite");
+    }
+    async function deleteSender(address) {
+      if (!confirm(`Move every message from ${address} to Deleted Items? This is reversible from Deleted Items.`)) return;
+      setStatus(`Finding messages from ${address}…`);
+      const filter = encodeURIComponent(`from/emailAddress/address eq '${address.replace(/'/g, "''")}'`);
+      let url = `${graph}/me/messages?$select=id&$top=100&$filter=${filter}`;
+      let deleted = 0;
+      while (url) {
+        const response = await fetch(url, { headers: { Authorization: ["Bearer", token].join(" "), ConsistencyLevel: "eventual" } });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Could not find the sender's messages.");
+        for (const message of data.value) {
+          await graphFetch(`/me/messages/${message.id}`, { method: "DELETE" });
+          deleted++;
+        }
+        url = data["@odata.nextLink"];
+      }
+      setStatus(`Moved ${deleted} message${deleted === 1 ? "" : "s"} from ${address} to Deleted Items.`);
+      subscriptions = subscriptions.filter(item => item.address !== address);
+      renderSubscriptions(0);
+    }
+    async function initialize() {
+      clientIdInput.value = sessionStorage.getItem("graphClientId") || "";
+      await finishLogin();
+      if (!token) return;
+      setup.classList.add("hidden"); app.classList.remove("hidden");
+      const me = await graphFetch("/me?$select=displayName,userPrincipalName");
+      document.querySelector("#identity").textContent = `Signed in as ${me.displayName || me.userPrincipalName}.`;
+      const sender = sessionStorage.getItem("deleteSender");
+      sessionStorage.removeItem("deleteSender");
+      if (sender) await deleteSender(sender); else await scanInbox();
+    }
+    document.querySelector("#sign-in").onclick = () => startLogin("Mail.Read");
+    document.querySelector("#scan").onclick = () => scanInbox().catch(error => setStatus(error.message));
+    document.querySelector("#sign-out").onclick = () => { sessionStorage.clear(); location.reload(); };
+    initialize().catch(error => setStatus(error.message));
+  </script>
 </body>
 </html>
