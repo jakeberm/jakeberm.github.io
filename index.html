@@ -36,6 +36,7 @@
     const status = document.querySelector("#status");
     let token = sessionStorage.getItem("graphToken");
     let subscriptions = [];
+    const BATCH_SIZE = 20;
 
     const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
     const redirectUri = () => `${location.origin}${location.pathname}`;
@@ -97,7 +98,10 @@
     function unsubscribeUrl(headers) {
       const header = headers?.find(item => item.name.toLowerCase() === "list-unsubscribe")?.value || "";
       const url = header.match(/<(https:\/\/[^>\s]+)>/i)?.[1];
-      try { return url && new URL(url).protocol === "https:" ? url : null; } catch { return null; }
+      return isSafeHttpsUrl(url) ? url : null;
+    }
+    function isSafeHttpsUrl(url) {
+      try { return new URL(url).protocol === "https:"; } catch { return false; }
     }
     function isSubscription(message) {
       const headers = message.internetMessageHeaders || [];
@@ -142,7 +146,10 @@
         if (subscription.url) {
           const unsubscribe = document.createElement("button");
           unsubscribe.textContent = "Open unsubscribe page";
-          unsubscribe.onclick = () => { if (confirm(`Open this HTTPS unsubscribe page for ${subscription.address}?\n${subscription.url}`)) window.open(subscription.url, "_blank", "noopener"); };
+          unsubscribe.onclick = () => {
+            if (!isSafeHttpsUrl(subscription.url)) return setStatus("The unsubscribe link is not a safe HTTPS URL.");
+            if (confirm(`Open this HTTPS unsubscribe page for ${subscription.address}?\n${subscription.url}`)) window.open(subscription.url, "_blank", "noopener");
+          };
           card.append(unsubscribe);
         } else card.insertAdjacentHTML("beforeend", '<p class="muted">No List-Unsubscribe link was supplied. Use the sender’s email or website to unsubscribe.</p>');
         const remove = document.createElement("button");
@@ -159,7 +166,7 @@
     }
     async function deleteSender(address) {
       if (!confirm(`Move every message from ${address} to Deleted Items? This is reversible from Deleted Items.`)) return;
-      if (!/^[^@\s]+@[^@\s]+$/.test(address)) throw new Error("The sender address is not valid for a bulk deletion.");
+      if (!/^[A-Z0-9.!#$%&*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/i.test(address)) throw new Error("The sender address is not valid for a bulk deletion.");
       setStatus(`Finding messages from ${address}…`);
       const filter = encodeURIComponent(`from/emailAddress/address eq '${address.replace(/'/g, "''")}'`);
       let url = `${graph}/me/messages?$select=id&$top=100&$filter=${filter}`;
@@ -168,11 +175,11 @@
         const response = await authorizedFetch(url, { headers: { ConsistencyLevel: "eventual" } });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Could not find the sender's messages.");
-        for (let i = 0; i < data.value.length; i += 20) {
+        for (let i = 0; i < data.value.length; i += BATCH_SIZE) {
           const batch = await graphFetch("/$batch", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ requests: data.value.slice(i, i + 20).map((message, index) => ({
+            body: JSON.stringify({ requests: data.value.slice(i, i + BATCH_SIZE).map((message, index) => ({
               id: String(index), method: "DELETE", url: `/me/messages/${message.id}`
             })) })
           });
