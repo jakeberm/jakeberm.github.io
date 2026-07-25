@@ -64,7 +64,7 @@
       const clientId = sessionStorage.getItem("graphClientId");
       const verifier = sessionStorage.getItem("pkceVerifier");
       const returnedState = new URLSearchParams(location.search).get("state");
-      if (!clientId || !verifier || returnedState !== sessionStorage.getItem("oauthState")) return setStatus("Sign-in session expired. Please start again.");
+      if (!clientId || !verifier || returnedState !== sessionStorage.getItem("oauthState")) return setStatus("Sign-in validation failed. Please start again.");
       history.replaceState({}, "", location.pathname);
       const body = new URLSearchParams({ client_id: clientId, grant_type: "authorization_code", code, redirect_uri: location.href, code_verifier: verifier });
       const response = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
@@ -76,8 +76,17 @@
       sessionStorage.removeItem("oauthState");
     }
 
+    async function authorizedFetch(url, options = {}) {
+      const response = await fetch(url, { ...options, headers: { Authorization: ["Bearer", token].join(" "), ...options.headers } });
+      if (response.status === 401) {
+        token = null;
+        sessionStorage.removeItem("graphToken");
+        throw new Error("Your sign-in session expired. Please sign in again.");
+      }
+      return response;
+    }
     async function graphFetch(path, options = {}) {
-      const response = await fetch(`${graph}${path}`, { ...options, headers: { Authorization: ["Bearer", token].join(" "), ...options.headers } });
+      const response = await authorizedFetch(`${graph}${path}`, options);
       if (response.status === 204) return null;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error?.message || "Microsoft Graph request failed.");
@@ -86,7 +95,8 @@
 
     function unsubscribeUrl(headers) {
       const header = headers?.find(item => item.name.toLowerCase() === "list-unsubscribe")?.value || "";
-      return header.match(/<((?:https?):\/\/[^>\s]+)>/i)?.[1] || null;
+      const url = header.match(/<(https:\/\/[^>\s]+)>/i)?.[1];
+      try { return url && new URL(url).protocol === "https:" ? url : null; } catch { return null; }
     }
     function isSubscription(message) {
       const headers = message.internetMessageHeaders || [];
@@ -99,7 +109,7 @@
       let url = `${graph}/me/mailFolders/inbox/messages?$top=50&$select=id,subject,from,receivedDateTime,body,internetMessageHeaders`;
       const messages = [];
       while (url && messages.length < 250) {
-        const response = await fetch(url, { headers: { Authorization: ["Bearer", token].join(" ") } });
+        const response = await authorizedFetch(url);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Could not read inbox.");
         messages.push(...data.value);
@@ -119,7 +129,9 @@
     }
     function renderSubscriptions(scanned) {
       results.replaceChildren();
-      setStatus(`Found ${subscriptions.length} possible subscription sender${subscriptions.length === 1 ? "" : "s"} in ${scanned} recent inbox messages.`);
+      setStatus(scanned === undefined
+        ? `${subscriptions.length} subscription sender${subscriptions.length === 1 ? "" : "s"} remaining in this review.`
+        : `Found ${subscriptions.length} possible subscription sender${subscriptions.length === 1 ? "" : "s"} in ${scanned} recent inbox messages.`);
       for (const subscription of subscriptions) {
         const card = document.createElement("article");
         card.className = "card";
@@ -129,7 +141,7 @@
         if (subscription.url) {
           const unsubscribe = document.createElement("button");
           unsubscribe.textContent = "Open unsubscribe page";
-          unsubscribe.onclick = () => { if (confirm(`Open the unsubscribe page for ${subscription.address}?`)) window.open(subscription.url, "_blank", "noopener"); };
+          unsubscribe.onclick = () => { if (confirm(`Open this HTTPS unsubscribe page for ${subscription.address}?\n${subscription.url}`)) window.open(subscription.url, "_blank", "noopener"); };
           card.append(unsubscribe);
         } else card.insertAdjacentHTML("beforeend", '<p class="muted">No List-Unsubscribe link was supplied. Use the sender’s email or website to unsubscribe.</p>');
         const remove = document.createElement("button");
@@ -146,23 +158,32 @@
     }
     async function deleteSender(address) {
       if (!confirm(`Move every message from ${address} to Deleted Items? This is reversible from Deleted Items.`)) return;
+      if (!/^[^@\s]+@[^@\s]+$/.test(address)) throw new Error("The sender address is not valid for a bulk deletion.");
       setStatus(`Finding messages from ${address}…`);
       const filter = encodeURIComponent(`from/emailAddress/address eq '${address.replace(/'/g, "''")}'`);
       let url = `${graph}/me/messages?$select=id&$top=100&$filter=${filter}`;
       let deleted = 0;
       while (url) {
-        const response = await fetch(url, { headers: { Authorization: ["Bearer", token].join(" "), ConsistencyLevel: "eventual" } });
+        const response = await authorizedFetch(url, { headers: { ConsistencyLevel: "eventual" } });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Could not find the sender's messages.");
-        for (const message of data.value) {
-          await graphFetch(`/me/messages/${message.id}`, { method: "DELETE" });
-          deleted++;
+        for (let i = 0; i < data.value.length; i += 20) {
+          const batch = await graphFetch("/$batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ requests: data.value.slice(i, i + 20).map((message, index) => ({
+              id: String(index), method: "DELETE", url: `/me/messages/${message.id}`
+            })) })
+          });
+          const failed = batch.responses.filter(item => item.status < 200 || item.status >= 300);
+          deleted += batch.responses.length - failed.length;
+          if (failed.length) throw new Error(`Moved ${deleted} messages, but ${failed.length} message deletion${failed.length === 1 ? "" : "s"} failed.`);
         }
         url = data["@odata.nextLink"];
       }
       setStatus(`Moved ${deleted} message${deleted === 1 ? "" : "s"} from ${address} to Deleted Items.`);
       subscriptions = subscriptions.filter(item => item.address !== address);
-      renderSubscriptions(0);
+      renderSubscriptions();
     }
     async function initialize() {
       clientIdInput.value = sessionStorage.getItem("graphClientId") || "";
