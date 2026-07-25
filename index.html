@@ -37,6 +37,7 @@
     let token = sessionStorage.getItem("graphToken");
     let subscriptions = [];
     const BATCH_SIZE = 20;
+    const SUBSCRIPTION_PATTERN = /\b(unsubscribe|manage (?:your )?preferences|email preferences|mailing list)\b/i;
 
     const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
     const redirectUri = () => `${location.origin}${location.pathname}`;
@@ -46,7 +47,7 @@
 
     async function startLogin(scopes) {
       const clientId = clientIdInput.value.trim();
-      if (!/^[0-9a-f-]{36}$/i.test(clientId)) return setStatus("Enter a valid Microsoft application client ID.");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) return setStatus("Enter a valid Microsoft application client ID.");
       const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
       const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
       sessionStorage.setItem("pkceVerifier", verifier);
@@ -106,7 +107,7 @@
     function isSubscription(message) {
       const headers = message.internetMessageHeaders || [];
       return headers.some(item => item.name.toLowerCase() === "list-unsubscribe") ||
-        /\b(unsubscribe|manage (?:your )?preferences|email preferences|mailing list)\b/i.test(message.body?.content || "");
+        SUBSCRIPTION_PATTERN.test(message.body?.content || "");
     }
     async function scanInbox() {
       setStatus("Scanning the 250 most recent inbox messages…");
