@@ -41,7 +41,8 @@ def _decisions() -> dict[str, str]:
     }
 
 
-def plan(client: GraphClient, profile: dict, older_than_days: int, folders) -> list[dict]:
+def plan(client: GraphClient, profile: dict, older_than_days: int, folders,
+         only_senders: set[str] | None = None, limit: int | None = None) -> list[dict]:
     cleanup = profile["cleanup"]
     protected_senders = {s.lower() for s in cleanup.get("protected_senders", [])}
     protected_domains = {d.lower() for d in cleanup.get("protected_domains", [])}
@@ -49,6 +50,7 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders) -> l
     noise_domains = {d.lower() for d in cleanup.get("noise_domains", [])}
     routed = {str(r.get("sender", "")).lower() for r in cleanup.get("routes", [])}
     decisions = _decisions()
+    cap = limit or cleanup["max_actions_per_run"]
 
     cutoff = config.iso(config.utcnow() - timedelta(days=older_than_days))
     # Look back well past the cutoff so old mail is actually reachable.
@@ -59,7 +61,7 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders) -> l
 
     for folder in folders:
         try:
-            messages = client.iter_messages(folder, since, SELECT, limit=cleanup["max_actions_per_run"] * 4)
+            messages = client.iter_messages(folder, since, SELECT, limit=cap * 4)
         except GraphError as exc:
             print(f"  ! skipped folder '{folder}': {exc}", file=sys.stderr)
             continue
@@ -71,6 +73,10 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders) -> l
 
             email, _ = _sender(message)
             if not email:
+                continue
+            # An explicit sender list means "only these", and it overrides the
+            # usual noise/junk eligibility so the sweep stays predictable.
+            if only_senders is not None and email not in only_senders:
                 continue
             domain = _domain(email)
             decision = decisions.get(email, "pending")
@@ -103,7 +109,7 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders) -> l
             )
 
     actions.sort(key=lambda a: a["received"])
-    return actions[: cleanup["max_actions_per_run"]]
+    return actions[:cap]
 
 
 def summarize(actions: list[dict]) -> None:
@@ -164,12 +170,33 @@ def main() -> int:
         help="grace period in days; newer mail is never touched (default 30)",
     )
     parser.add_argument("--folders", nargs="+", default=list(DEFAULT_FOLDERS))
+    parser.add_argument(
+        "--senders",
+        nargs="+",
+        help="restrict the sweep to these exact addresses",
+    )
+    parser.add_argument(
+        "--senders-file",
+        help="file with one sender address per line (avoids shell length limits)",
+    )
+    parser.add_argument("--limit", type=int, help="override max_actions_per_run")
     parser.add_argument("--non-interactive", action="store_true")
     args = parser.parse_args()
 
     if args.purge and not args.apply:
         print("--purge requires --apply", file=sys.stderr)
         return 2
+
+    only_senders = None
+    if args.senders or args.senders_file:
+        only_senders = {s.strip().lower() for s in (args.senders or []) if s.strip()}
+        if args.senders_file:
+            with open(args.senders_file, encoding="utf-8") as fh:
+                only_senders |= {
+                    line.strip().lower()
+                    for line in fh
+                    if line.strip() and not line.startswith("#")
+                }
 
     try:
         profile = config.load_profile()
@@ -179,10 +206,12 @@ def main() -> int:
 
     client = GraphClient(profile)
     mode = "PURGE (permanent)" if args.purge else "delete -> Deleted Items (recoverable)"
-    print(f"purge plan: older than {args.older_than}d | mode: {mode}")
+    scope = f" | {len(only_senders)} sender(s)" if only_senders else ""
+    print(f"purge plan: older than {args.older_than}d | mode: {mode}{scope}")
 
     try:
-        actions = plan(client, profile, args.older_than, args.folders)
+        actions = plan(client, profile, args.older_than, args.folders,
+                       only_senders, args.limit)
     except GraphError as exc:
         print(f"graph error: {exc}", file=sys.stderr)
         return 1

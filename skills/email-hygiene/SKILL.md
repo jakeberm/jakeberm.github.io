@@ -78,6 +78,10 @@ Put the Application (client) ID in `account.client_id`. `scripts/auth.py` prints
 | `python scripts\decide.py set <addr> <unsubscribe\|block\|keep>` | Records a decision. |
 | `python scripts\decide.py route <addr> "Inbox/Sub"` | Files a sender to a folder, stays subscribed. |
 | `python scripts\decide.py protect <addr>` | Never file, never suggest (security/2FA mail). |
+| `python scripts\triage.py` | Proposes a decision for every undecided sender, grouped for bulk review. |
+| `python scripts\triage.py --accept <group>` | Records the proposed decision for a whole group. |
+| `python scripts\unsubscribe.py` | Dry run — shows the opt-out method available per sender. |
+| `python scripts\unsubscribe.py --apply` | Performs one-click and mailto opt-outs; prints the rest. |
 | `python scripts\cleanup.py` | Dry run of the filing pass. |
 | `python scripts\cleanup.py --apply` | Routes/files noise, marks it read. |
 | `python scripts\rules_sync.py list` | Shows all inbox rules; `*` marks skill-managed ones. |
@@ -86,7 +90,43 @@ Put the Application (client) ID in `account.client_id`. `scripts/auth.py` prints
 | `python scripts\run.py --apply` | Full cycle, applies changes, emails the digest. |
 | `python scripts\auth.py status` | Checks whether the cached token still works. |
 
-## How senders are scored
+## Bulk triage
+
+`triage.py` exists because reviewing a hundred senders one at a time isn't realistic. It
+classifies every undecided sender into a group with a proposed decision and a stated reason,
+so a whole category can be accepted at once.
+
+Groups are matched in priority order — security beats receipts, which beats marketing — so a
+2FA mail that happens to say "order" doesn't get filed as a receipt.
+
+**The proposals are a starting point, not an answer.** Subject-keyword matching reliably
+mistakes some important mail for marketing: health insurers, mortgage servicers and legal
+notices all use promotional-sounding language. Read a group before accepting it, and expect
+to override a handful by hand. Anything with no clear signal is left `pending` rather than
+guessed at.
+
+## Unsubscribing
+
+`unsubscribe.py` is the only module that contacts anyone outside the mailbox, so it is narrow
+about how:
+
+| Method | When | What happens |
+|---|---|---|
+| One-click | Sender sends `List-Unsubscribe-Post: List-Unsubscribe=One-Click` with an HTTPS URL | An HTTPS POST, per RFC 8058 |
+| mailto | The header offers a `mailto:` target | An unsubscribe mail is sent from your mailbox |
+| manual | Only a bare link is offered | The URL is printed for you to open |
+
+Bare links are never fetched. RFC 8058 requires a one-click endpoint to be safe to POST to
+without confirmation; an ordinary link carries no such guarantee, and a blind GET can confirm
+to a spammer that the address is live. That distinction is the whole reason for the split.
+
+Results are recorded in `unsubscribes.json`, so re-running won't re-send. Use `--retry` to
+force another attempt.
+
+Note that opting out is not the same as deleting: `unsubscribe.py` stops future mail, and
+`purge.py` clears what already arrived.
+
+
 
 `analyze.py` aggregates every message in the scan window by sender, then computes a 0–100
 unsubscribe score from four signals:

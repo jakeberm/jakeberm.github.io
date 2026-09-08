@@ -197,6 +197,30 @@ class GraphClient:
         }
         return self.paged(path, params=params, limit=limit)
 
+    def newest_message_from(self, address: str) -> dict | None:
+        """Most recent message from one sender, across the whole mailbox.
+
+        Used to read live List-Unsubscribe headers, which are per-message and
+        so can't be taken from a cached scan.
+
+        Graph rejects `$filter` on the sender combined with `$orderby`
+        (`InefficientFilter`), so we pull a small unordered page and pick the
+        newest ourselves.
+        """
+        escaped = address.replace("'", "''")
+        data = self.get(
+            "/me/messages",
+            params={
+                "$filter": f"from/emailAddress/address eq '{escaped}'",
+                "$top": 25,
+                "$select": "id,receivedDateTime,subject",
+            },
+        )
+        items = data.get("value") or []
+        if not items:
+            return None
+        return max(items, key=lambda m: m.get("receivedDateTime") or "")
+
     def get_message_headers(self, message_id: str) -> list[dict]:
         data = self.get(
             f"/me/messages/{quote(message_id)}",

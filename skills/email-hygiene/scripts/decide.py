@@ -44,24 +44,71 @@ def cmd_list(_args) -> int:
     return 0
 
 
-def cmd_set(args) -> int:
-    payload = _decisions()
-    address = args.address.lower()
+def apply_decision(payload: dict, address: str, decision: str) -> None:
+    """Record a decision in an already-loaded payload. Caller saves."""
+    address = address.lower()
     for row in payload.setdefault("decisions", []):
         if row["address"].lower() == address:
-            row["decision"] = args.decision
+            row["decision"] = decision
             row["decided_at"] = config.iso(config.utcnow())
             break
     else:
         payload["decisions"].append(
             {
                 "address": address,
-                "decision": args.decision,
+                "decision": decision,
                 "decided_at": config.iso(config.utcnow()),
             }
         )
+    config.audit("decision", address=address, decision=decision)
+
+
+def apply_route(profile: dict, payload: dict, address: str, folder: str,
+                mark_read: bool = False) -> None:
+    """Add a routing rule in already-loaded objects. Caller saves both."""
+    routes = profile["cleanup"].setdefault("routes", [])
+    address = address.lower()
+    is_domain = not address.startswith("@") and "@" not in address
+    bare = address.lstrip("@")
+
+    for route in routes:
+        if route.get("folder") == folder:
+            bucket = route.setdefault("domains" if is_domain else "senders", [])
+            if bare not in bucket:
+                bucket.append(bare)
+            route.setdefault("mark_read", mark_read)
+            break
+    else:
+        routes.append(
+            {
+                "folder": folder,
+                "senders": [] if is_domain else [address],
+                "domains": [bare] if is_domain else [],
+                "subject_patterns": [],
+                "mark_read": mark_read,
+            }
+        )
+    # A routed sender shouldn't keep showing up as an unsubscribe suggestion.
+    apply_decision(payload, address, "keep")
+    config.audit("route", address=address, folder=folder)
+
+
+def apply_protect(profile: dict, payload: dict, address: str) -> None:
+    """Mark a sender protected in already-loaded objects. Caller saves both."""
+    address = address.lower()
+    key = "protected_domains" if "@" not in address else "protected_senders"
+    bucket = profile["cleanup"].setdefault(key, [])
+    if address.lstrip("@") not in bucket:
+        bucket.append(address.lstrip("@"))
+    apply_decision(payload, address, "keep")
+    config.audit("protect", address=address)
+
+
+def cmd_set(args) -> int:
+    payload = _decisions()
+    address = args.address.lower()
+    apply_decision(payload, address, args.decision)
     _save(payload)
-    config.audit("decision", address=address, decision=args.decision)
     print(f"{address} -> {args.decision}")
     if args.decision == "unsubscribe":
         row = next((r for r in payload["decisions"] if r["address"].lower() == address), {})
@@ -74,58 +121,21 @@ def cmd_set(args) -> int:
 
 def cmd_route(args) -> int:
     profile = config.load_profile()
-    routes = profile["cleanup"].setdefault("routes", [])
-    address = args.address.lower()
-    is_domain = not args.address.startswith("@") and "@" not in args.address
-
-    for route in routes:
-        if route.get("folder") == args.folder:
-            bucket = route.setdefault("domains" if is_domain else "senders", [])
-            if address.lstrip("@") not in bucket:
-                bucket.append(address.lstrip("@"))
-            route.setdefault("mark_read", args.mark_read)
-            break
-    else:
-        routes.append(
-            {
-                "folder": args.folder,
-                "senders": [] if is_domain else [address],
-                "domains": [address.lstrip("@")] if is_domain else [],
-                "subject_patterns": [],
-                "mark_read": args.mark_read,
-            }
-        )
-
-    config.save_profile(profile)
-    # A routed sender shouldn't keep showing up as an unsubscribe suggestion.
     payload = _decisions()
-    for row in payload.get("decisions", []):
-        if row["address"].lower() == address:
-            row["decision"] = "keep"
-            row["decided_at"] = config.iso(config.utcnow())
+    apply_route(profile, payload, args.address, args.folder, args.mark_read)
+    config.save_profile(profile)
     _save(payload)
-    config.audit("route", address=address, folder=args.folder)
-    print(f"{address} -> folder '{args.folder}' (still subscribed)")
+    print(f"{args.address.lower()} -> folder '{args.folder}' (still subscribed)")
     return 0
 
 
 def cmd_protect(args) -> int:
     profile = config.load_profile()
-    address = args.address.lower()
-    key = "protected_domains" if "@" not in address else "protected_senders"
-    bucket = profile["cleanup"].setdefault(key, [])
-    if address.lstrip("@") not in bucket:
-        bucket.append(address.lstrip("@"))
-    config.save_profile(profile)
-
     payload = _decisions()
-    for row in payload.get("decisions", []):
-        if row["address"].lower() == address:
-            row["decision"] = "keep"
-            row["decided_at"] = config.iso(config.utcnow())
+    apply_protect(profile, payload, args.address)
+    config.save_profile(profile)
     _save(payload)
-    config.audit("protect", address=address)
-    print(f"{address} -> protected (never filed, never suggested)")
+    print(f"{args.address.lower()} -> protected (never filed, never suggested)")
     return 0
 
 
