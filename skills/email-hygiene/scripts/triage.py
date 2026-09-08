@@ -98,12 +98,27 @@ def build(limit_group: str | None = None) -> dict[str, list]:
     if not scan:
         raise SystemExit(f"No deep scan yet. Run: python scripts/deep_scan.py --days 365")
 
+    # The scan is a snapshot, so anything decided since then must be filtered
+    # out here or it comes back as undecided on every run.
+    decided = {
+        d["address"].lower()
+        for d in config.load_json(config.DECISIONS_PATH, {}).get("decisions", [])
+        if (d.get("decision") or "pending") != "pending"
+    }
+    profile = config.load_profile()
+    cleanup = profile.get("cleanup", {})
+    for key in ("protected_senders", "protected_domains"):
+        decided |= {s.lower() for s in cleanup.get(key, [])}
+    for route in cleanup.get("routes", []):
+        decided |= {s.lower() for s in route.get("senders", [])}
+
     seen, pool = set(), []
     for bucket in ("undecided_subscriptions", "suspected_spam"):
         for sender in scan.get(bucket, []):
-            if sender["address"] in seen:
+            address = sender["address"].lower()
+            if address in seen or address in decided:
                 continue
-            seen.add(sender["address"])
+            seen.add(address)
             pool.append(sender)
 
     groups: dict[str, list] = defaultdict(list)
