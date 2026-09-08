@@ -1,0 +1,15 @@
+# Never commit personal data or credentials — this repo is public.
+profile.json
+*token_cache*
+decisions.json
+analysis.json
+state.json
+reports/
+logs/
+.email-hygiene/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
