@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,7 @@ PROFILE_PATH = APP_DIR / "profile.json"
 TOKEN_CACHE_PATH = APP_DIR / "token_cache.bin"
 STATE_PATH = APP_DIR / "state.json"
 ANALYSIS_PATH = APP_DIR / "analysis.json"
+DEEP_SCAN_PATH = APP_DIR / "deep_scan.json"
 DECISIONS_PATH = APP_DIR / "decisions.json"
 REPORT_DIR = APP_DIR / "reports"
 LOG_DIR = APP_DIR / "logs"
@@ -39,6 +41,24 @@ SCOPES = [
 
 class ProfileError(RuntimeError):
     """Raised when the profile is missing or malformed."""
+
+
+def init_console() -> None:
+    """Make stdout/stderr survive emoji and non-cp1252 subject lines.
+
+    Windows consoles default to cp1252, so printing a subject containing an
+    emoji raises UnicodeEncodeError and kills a long scan mid-run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
+init_console()
 
 
 def utcnow() -> datetime:

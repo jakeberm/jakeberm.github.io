@@ -204,6 +204,21 @@ def analyze(interactive: bool = True) -> dict:
 
     candidates.sort(key=lambda r: r["score"], reverse=True)
 
+    # A sender you have already ruled on should not keep showing up as a new
+    # suggestion every run - park it in previously_decided instead.
+    prior_decisions = {
+        d["address"]: d.get("decision", "pending")
+        for d in config.load_json(config.DECISIONS_PATH, {}).get("decisions", [])
+    }
+    pending, decided = [], []
+    for record in candidates:
+        choice = prior_decisions.get(record["address"], "pending")
+        if choice in ("pending", None, ""):
+            pending.append(record)
+        else:
+            record["decision"] = choice
+            decided.append(record)
+
     analysis = {
         "generated_at": config.iso(config.utcnow()),
         "account": profile["account"]["email"],
@@ -217,12 +232,25 @@ def analyze(interactive: bool = True) -> dict:
                 for k, v in record.items()
                 if k not in ("sample_message_id", "protected")
             }
-            for record in candidates
+            for record in pending
+        ],
+        "previously_decided": [
+            {
+                "address": record["address"],
+                "name": record["name"],
+                "count": record["count"],
+                "score": record["score"],
+                "decision": record["decision"],
+            }
+            for record in decided
         ],
     }
     config.save_json(config.ANALYSIS_PATH, analysis)
     seed_decisions(analysis)
-    print(f"  {len(candidates)} unsubscribe candidates -> {config.ANALYSIS_PATH}")
+    print(
+        f"  {len(pending)} new unsubscribe candidates "
+        f"({len(decided)} already decided) -> {config.ANALYSIS_PATH}"
+    )
     return analysis
 
 

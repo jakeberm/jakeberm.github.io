@@ -115,14 +115,68 @@ class GraphClient:
             self._folder_cache[folder["displayName"].lower()] = folder["id"]
         return self._folder_cache.get(key)
 
-    def ensure_folder(self, name: str) -> str:
-        """Return the id of a top-level folder, creating it when absent."""
-        existing = self.resolve_folder_id(name)
-        if existing:
-            return existing
-        created = self.post("/me/mailFolders", {"displayName": name})
-        self._folder_cache[name.lower()] = created["id"]
-        return created["id"]
+    def list_child_folders(self, parent_id: str) -> list[dict]:
+        return list(
+            self.paged(
+                f"/me/mailFolders/{quote(parent_id)}/childFolders",
+                params={"$top": 100, "$select": "id,displayName"},
+            )
+        )
+
+    def _split_path(self, path: str) -> tuple[str, list[str]]:
+        """Split 'Inbox/GitHub/PRs' into (root_folder_id, ['GitHub', 'PRs'])."""
+        parts = [p.strip() for p in path.replace("\\", "/").split("/") if p.strip()]
+        root = "msgfolderroot"
+        if parts and parts[0].lower().replace(" ", "") in WELL_KNOWN_FOLDERS:
+            root = parts[0].lower().replace(" ", "")
+            parts = parts[1:]
+        return root, parts
+
+    def _find_child(self, parent_id: str, name: str) -> str | None:
+        key = f"{parent_id}/{name.lower()}"
+        if key in self._folder_cache:
+            return self._folder_cache[key]
+        for folder in self.list_child_folders(parent_id):
+            self._folder_cache[f"{parent_id}/{folder['displayName'].lower()}"] = folder["id"]
+        return self._folder_cache.get(key)
+
+    def resolve_folder_path(self, path: str) -> str | None:
+        """Resolve a possibly-nested folder path without creating anything."""
+        parent, parts = self._split_path(path)
+        if not parts:
+            return parent
+        # A bare name may also be an existing top-level folder.
+        if len(parts) == 1:
+            direct = self.resolve_folder_id(parts[0])
+            if direct:
+                return direct
+        for part in parts:
+            found = self._find_child(parent, part)
+            if not found:
+                return None
+            parent = found
+        return parent
+
+    def ensure_folder(self, path: str) -> str:
+        """Return the id of a folder path like 'Inbox/GitHub', creating levels as needed."""
+        parent, parts = self._split_path(path)
+        if not parts:
+            return parent
+        if len(parts) == 1:
+            direct = self.resolve_folder_id(parts[0])
+            if direct:
+                return direct
+        for part in parts:
+            found = self._find_child(parent, part)
+            if not found:
+                created = self.post(
+                    f"/me/mailFolders/{quote(parent)}/childFolders",
+                    {"displayName": part},
+                )
+                self._folder_cache[f"{parent}/{part.lower()}"] = created["id"]
+                found = created["id"]
+            parent = found
+        return parent
 
     def iter_messages(
         self,

@@ -44,12 +44,41 @@ def blocked_addresses() -> set[str]:
     }
 
 
+def _load_routes(cleanup: dict) -> list[dict]:
+    """Normalize cleanup.routes into matcher dicts."""
+    routes = []
+    for route in cleanup.get("routes", []):
+        folder = route.get("folder")
+        if not folder:
+            continue
+        routes.append(
+            {
+                "folder": folder,
+                "senders": {s.lower() for s in route.get("senders", [])},
+                "domains": {d.lower().lstrip("@") for d in route.get("domains", [])},
+                "patterns": _compile(route.get("subject_patterns", [])),
+                "mark_read": bool(route.get("mark_read", False)),
+            }
+        )
+    return routes
+
+
+def _match_route(routes: list[dict], address: str, domain: str, subject: str) -> dict | None:
+    for route in routes:
+        if address in route["senders"] or domain in route["domains"]:
+            return route
+        if any(p.search(subject) for p in route["patterns"]):
+            return route
+    return None
+
+
 def plan(client: GraphClient, profile: dict) -> list[dict]:
     """Build the list of intended actions without performing any of them."""
     cleanup = profile["cleanup"]
     if not cleanup.get("enabled", True):
         return []
 
+    routes = _load_routes(cleanup)
     noise_senders = {s.lower() for s in cleanup.get("noise_senders", [])} | blocked_addresses()
     noise_domains = {d.lower().lstrip("@") for d in cleanup.get("noise_domains", [])}
     subject_patterns = _compile(cleanup.get("noise_subject_patterns", []))
@@ -70,6 +99,23 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
             continue
 
         subject = message.get("subject") or ""
+
+        route = _match_route(routes, address, domain, subject)
+        if route:
+            actions.append(
+                {
+                    "message_id": message["id"],
+                    "address": address,
+                    "subject": subject[:120],
+                    "received": message.get("receivedDateTime"),
+                    "action": "route",
+                    "folder": route["folder"],
+                    "reason": f"route -> {route['folder']}",
+                    "mark_read": route["mark_read"] and not message.get("isRead", True),
+                }
+            )
+            continue
+
         reason = None
         if address in noise_senders:
             reason = "noise sender"
@@ -86,6 +132,7 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
                     "subject": subject[:120],
                     "received": message.get("receivedDateTime"),
                     "action": "move_to_noise",
+                    "folder": profile["folders"]["noise"],
                     "reason": reason,
                     "mark_read": cleanup.get("mark_noise_as_read", True)
                     and not message.get("isRead", True),
@@ -104,6 +151,7 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
                         "subject": subject[:120],
                         "received": message.get("receivedDateTime"),
                         "action": "archive",
+                        "folder": "archive",
                         "reason": f"read and older than {stale_days}d",
                         "mark_read": False,
                     }
@@ -112,28 +160,33 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
 
 
 def execute(client: GraphClient, profile: dict, actions: list[dict], apply: bool) -> dict:
-    summary = {"planned": len(actions), "moved": 0, "archived": 0, "marked_read": 0, "errors": 0}
-    if not actions:
+    summary = {
+        "planned": len(actions),
+        "moved": 0,
+        "routed": 0,
+        "archived": 0,
+        "marked_read": 0,
+        "errors": 0,
+    }
+    if not actions or not apply:
         return summary
 
-    noise_folder_id = archive_folder_id = None
-    if apply:
-        noise_folder_id = client.ensure_folder(profile["folders"]["noise"])
-        archive_folder_id = client.resolve_folder_id("archive") or noise_folder_id
-
+    folder_ids: dict[str, str] = {}
     for action in actions:
-        if not apply:
-            continue
-        destination = noise_folder_id if action["action"] == "move_to_noise" else archive_folder_id
+        target = action["folder"]
+        if target not in folder_ids:
+            folder_ids[target] = client.ensure_folder(target)
         try:
             if action["mark_read"]:
                 client.mark_read(action["message_id"])
                 summary["marked_read"] += 1
-            client.move_message(action["message_id"], destination)
-            summary["moved" if action["action"] == "move_to_noise" else "archived"] += 1
+            client.move_message(action["message_id"], folder_ids[target])
+            key = {"route": "routed", "move_to_noise": "moved", "archive": "archived"}[action["action"]]
+            summary[key] += 1
             config.audit(
                 "cleanup",
                 action=action["action"],
+                folder=target,
                 address=action["address"],
                 reason=action["reason"],
                 subject=action["subject"],
@@ -170,7 +223,7 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 2
     print(
-        f"\nmoved={summary['moved']} archived={summary['archived']} "
+        f"\nrouted={summary['routed']} moved={summary['moved']} archived={summary['archived']} "
         f"marked_read={summary['marked_read']} errors={summary['errors']}"
     )
     return 0

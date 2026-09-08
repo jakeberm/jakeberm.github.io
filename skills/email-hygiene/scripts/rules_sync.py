@@ -28,11 +28,12 @@ def blocked_addresses() -> list[str]:
     )
 
 
-def build_plan(profile: dict, noise_folder_id: str) -> list[dict]:
-    """Return the desired set of [Hygiene] rules."""
+def build_plan(profile: dict, folder_ids: dict[str, str]) -> list[dict]:
+    """Return the desired set of [Hygiene] rules. folder_ids maps folder name -> id."""
     rules_cfg = profile["rules"]
     prefix = rules_cfg["prefix"]
     batch_size = rules_cfg.get("max_senders_per_rule", 40)
+    noise_folder_id = folder_ids[profile["folders"]["noise"]]
 
     senders = sorted(
         {s.lower() for s in profile["cleanup"].get("noise_senders", [])}
@@ -42,6 +43,31 @@ def build_plan(profile: dict, noise_folder_id: str) -> list[dict]:
 
     planned: list[dict] = []
     sequence = 10
+
+    for route in profile["cleanup"].get("routes", []):
+        folder = route.get("folder")
+        targets = sorted(
+            {s.lower() for s in route.get("senders", [])}
+            | {d.lower().lstrip("@") for d in route.get("domains", [])}
+        )
+        if not folder or not targets:
+            continue
+        for index, batch in enumerate(_chunks(targets, batch_size), start=1):
+            suffix = f" #{index}" if len(targets) > batch_size else ""
+            planned.append(
+                {
+                    "displayName": f"{prefix}Route {folder}{suffix}",
+                    "sequence": sequence,
+                    "isEnabled": True,
+                    "conditions": {"senderContains": batch},
+                    "actions": {
+                        "markAsRead": bool(route.get("mark_read", False)),
+                        "moveToFolder": folder_ids[folder],
+                        "stopProcessingRules": True,
+                    },
+                }
+            )
+            sequence += 1
 
     for index, batch in enumerate(_chunks(senders, batch_size), start=1):
         suffix = f" #{index}" if len(senders) > batch_size else ""
@@ -100,13 +126,17 @@ def sync(apply: bool = False, interactive: bool = True) -> dict:
     client = GraphClient(profile, interactive=interactive)
     prefix = profile["rules"]["prefix"]
 
-    noise_folder_id = (
-        client.ensure_folder(profile["folders"]["noise"])
-        if apply
-        else client.resolve_folder_id(profile["folders"]["noise"]) or "<noise-folder>"
-    )
+    folder_names = [profile["folders"]["noise"]] + [
+        r["folder"] for r in profile["cleanup"].get("routes", []) if r.get("folder")
+    ]
+    folder_ids: dict[str, str] = {}
+    for name in folder_names:
+        if apply:
+            folder_ids[name] = client.ensure_folder(name)
+        else:
+            folder_ids[name] = client.resolve_folder_path(name) or f"<{name}>"
 
-    planned = build_plan(profile, noise_folder_id)
+    planned = build_plan(profile, folder_ids)
     existing = [r for r in client.list_rules() if (r.get("displayName") or "").startswith(prefix)]
     by_name = {r["displayName"]: r for r in existing}
 

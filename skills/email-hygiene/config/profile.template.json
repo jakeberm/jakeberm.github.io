@@ -25,6 +25,8 @@
     "enabled": true,
     "max_actions_per_run": 300,
     "mark_noise_as_read": true,
+    "$routes_comment": "Route wanted-but-noisy senders to their own folder. Still subscribed, just filed. Folder may be nested, e.g. 'Inbox/GitHub'.",
+    "routes": [],
     "noise_senders": [],
     "noise_domains": [],
     "noise_subject_patterns": [],
