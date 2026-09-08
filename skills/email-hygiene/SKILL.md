@@ -18,9 +18,16 @@ Outlook rules so the filtering keeps working when the job isn't running.
 ## Safety model
 
 - **Dry run by default.** Every command requires `--apply` before it touches the mailbox.
-- **Nothing is deleted.** Messages are only moved between folders and marked read.
+- **Deletion is recoverable and opt-in.** `purge.py` only ever moves mail to Deleted Items unless
+  you also pass `--purge`. It only touches senders you already decided `unsubscribe`/`block`,
+  senders on the noise lists, or mail the server itself put in Junk — and only past a grace period
+  (default 30 days) so a recent unsubscribe confirmation is never swept away. The scheduled job
+  never passes `--purge`.
+- **Spam detection never deletes.** `deep_scan.py` flags suspected spam for review only. A flagged
+  sender is acted on only after you promote it with `decide.py set <addr> block`.
 - **Unsubscribe links are never clicked automatically.** They're surfaced in the report for you.
-- **Protected lists win.** `protected_senders` / `protected_domains` are exempt from every action.
+- **Protected lists win.** `protected_senders` / `protected_domains` are exempt from every action,
+  as is anything decided `keep`, `route`, or `protect`.
 - **Capped blast radius.** `max_actions_per_run` bounds a single run.
 - **Every change is logged** to `~/.email-hygiene/logs/actions.jsonl`.
 
@@ -64,6 +71,9 @@ Put the Application (client) ID in `account.client_id`. `scripts/auth.py` prints
 |---|---|
 | `python scripts\analyze.py` | Read-only scan. Ranks senders, scores unsubscribe candidates. |
 | `python scripts\deep_scan.py` | Read-only deep audit — long window, no volume floor, all folders. |
+| `python scripts\purge.py` | Dry run of deletion for aged mail from rejected senders. |
+| `python scripts\purge.py --apply` | Moves that mail to Deleted Items (recoverable). |
+| `python scripts\purge.py --apply --purge` | Permanent removal. Never used by the scheduled job. |
 | `python scripts\decide.py list` | Shows every recorded decision. |
 | `python scripts\decide.py set <addr> <unsubscribe\|block\|keep>` | Records a decision. |
 | `python scripts\decide.py route <addr> "Inbox/Sub"` | Files a sender to a folder, stays subscribed. |
@@ -119,6 +129,41 @@ It also reports **which address each list actually holds**, recovered from the
 reaching you through a forward from another account — and filtering it locally will hide it
 without ever taking you off the list. Those are grouped under `forwarded_subscriptions` in
 `~/.email-hygiene/deep_scan.json`.
+
+Set `account.aliases` for any address that delivers *into* this mailbox (Outlook.com aliases).
+Alias mail is direct, not forwarded, and is reported separately under `alias_subscriptions` —
+you can act on it here.
+
+### Spam flagging
+
+`deep_scan.py` also scores every probed sender for spam using weighted, explainable signals:
+
+| Signal | Weight |
+|---|---|
+| `server-marked-junk` — the server already binned it | 2 |
+| `run-together-words` — "FreeToys", "LoseWeight" | 2 |
+| `throwaway-domain` — 2+ random-looking senders share the domain | 2 |
+| `random-sender` — gibberish or consonant-run local part | 1 |
+| `never-opened` | 1 |
+| `no-optout-header` | 1 |
+
+Senders scoring ≥ 4 land in `suspected_spam`. **This only flags.** Nothing is deleted on spam
+evidence alone — promote a sender with `decide.py set <addr> block` and `purge.py` picks it up
+on the next run.
+
+## Deleting old mail
+
+```powershell
+python scripts\purge.py                      # dry run
+python scripts\purge.py --apply              # -> Deleted Items, recoverable
+python scripts\purge.py --apply --purge      # permanent
+python scripts\purge.py --older-than 60      # widen the grace period
+```
+
+Eligibility is deliberately deterministic — a message is only touched when its sender has a
+`unsubscribe`/`block` decision, is on the noise lists, or the message is in Junk, **and** it is
+older than the grace period. Run `purge.py` *before* `cleanup.py`: cleanup files noise into the
+Hygiene folder, which purge does not scan.
 
 ## The decision loop
 

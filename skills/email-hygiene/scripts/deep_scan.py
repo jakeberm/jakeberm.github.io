@@ -65,6 +65,70 @@ def _is_plausible_subscriber(address: str) -> bool:
     return True
 
 
+# Spam fingerprints. These only ever FLAG a sender for review -- nothing is
+# deleted on this evidence. The user promotes a flagged sender with
+# `decide.py set <addr> block`, and only then does purge.py act on it.
+GIBBERISH_LOCAL_RE = re.compile(r"^[a-z]+\.[a-z]{3,4}$")          # contact.wuk@
+RANDOM_TOKEN_RE = re.compile(r"[bcdfghjklmnpqrstvwxz]{5,}")        # udqzf, qwfnffabcjemfq
+# No \b anchor: the tell is a capital mid-word, as in "FreeToys" / "LoseWeight".
+RUNTOGETHER_RE = re.compile(r"[a-z]{2,}[A-Z][a-z]{2,}")
+
+# Weighted so a single weak signal cannot flag a legitimate sender. Mail the
+# server already binned, or subjects with spam-typical run-together words, count
+# double; "never opened" and "no opt-out header" are common on harmless low
+# volume mail and count single.
+SIGNAL_WEIGHTS = {
+    "server-marked-junk": 2,
+    "run-together-words": 2,
+    "throwaway-domain": 2,
+    "random-sender": 1,
+    "never-opened": 1,
+    "no-optout-header": 1,
+}
+SPAM_THRESHOLD = 4
+
+
+def spam_signals(record: dict, throwaway_domains: set[str]) -> list[str]:
+    """Cheap, explainable spam indicators for a sender we have already probed."""
+    reasons = []
+    local = record["address"].partition("@")[0]
+    subjects = record.get("sample_subjects") or []
+
+    if record["count"] and record["read_rate"] == 0.0:
+        reasons.append("never-opened")
+    if not record.get("has_unsubscribe"):
+        reasons.append("no-optout-header")
+    if GIBBERISH_LOCAL_RE.match(local) or RANDOM_TOKEN_RE.search(local):
+        reasons.append("random-sender")
+    if any(RUNTOGETHER_RE.search(s) for s in subjects):
+        reasons.append("run-together-words")
+    if "junkemail" in (record.get("folders") or []):
+        reasons.append("server-marked-junk")
+    if record["domain"] in throwaway_domains:
+        reasons.append("throwaway-domain")
+    return reasons
+
+
+def spam_score(reasons) -> int:
+    return sum(SIGNAL_WEIGHTS.get(r, 0) for r in reasons)
+
+
+def find_throwaway_domains(senders) -> set[str]:
+    """Domains fronting several random-looking senders are rented spam infrastructure.
+
+    A real business mails you from one or two stable addresses. Three different
+    gibberish local parts on one domain is a spam pattern, not a company.
+    """
+    by_domain: dict[str, set[str]] = {}
+    for s in senders:
+        local = s["address"].partition("@")[0]
+        if GIBBERISH_LOCAL_RE.match(local) or RANDOM_TOKEN_RE.search(local):
+            by_domain.setdefault(s["domain"], set()).add(local)
+    return {domain for domain, locals_ in by_domain.items() if len(locals_) >= 2}
+
+
+
+
 
 def subscribed_address(url: str | None, mailto: str | None) -> str | None:
     """Recover the address a bulk list has on file from its opt-out target.
@@ -146,6 +210,13 @@ def collect(client: GraphClient, folders, since_iso: str, budget: int) -> dict[s
     return stats
 
 
+def mailbox_addresses(profile: dict) -> set[str]:
+    """Every address that delivers directly into this mailbox (primary + aliases)."""
+    account = profile["account"]["email"].lower()
+    aliases = {a.lower() for a in profile["account"].get("aliases", []) if a}
+    return {account} | aliases
+
+
 def run(
     client: GraphClient,
     profile: dict,
@@ -155,6 +226,7 @@ def run(
     max_probe: int,
 ) -> dict:
     account = profile["account"]["email"].lower()
+    mine = mailbox_addresses(profile)
     protected_senders = {s.lower() for s in profile["cleanup"].get("protected_senders", [])}
     protected_domains = {d.lower() for d in profile["cleanup"].get("protected_domains", [])}
     decided = {
@@ -177,12 +249,25 @@ def run(
         probe = probe_unsubscribe(client, entry["sample_message_id"])
         on_file = subscribed_address(probe.get("url"), probe.get("mailto"))
         source = "unsubscribe-link" if on_file else None
-        # Fall back to the envelope recipient. A message sitting in this mailbox
-        # but addressed to another account is direct proof of a forward.
-        external = sorted(r for r in entry["recipients"] if r != account)
+        external = sorted(r for r in entry["recipients"] if r not in mine)
+        # An alias delivers straight into this mailbox, so it is ours to act on;
+        # only a genuinely different account means the opt-out must happen elsewhere.
+        alias_hits = sorted(r for r in entry["recipients"] if r in mine and r != account)
         if not on_file and len(external) == 1:
             on_file = external[0]
             source = "to-header"
+        if not on_file and alias_hits:
+            on_file = alias_hits[0]
+            source = "to-header"
+
+        if on_file and on_file not in mine:
+            delivery = "forward"
+        elif on_file and on_file != account:
+            delivery = "alias"
+        elif on_file or not alias_hits:
+            delivery = "direct" if on_file else "unknown"
+        else:
+            delivery = "alias"
         count = entry["count"]
         senders.append(
             {
@@ -203,8 +288,9 @@ def run(
                 "list_id": probe.get("list_id"),
                 "subscribed_as": on_file,
                 "subscribed_as_source": source,
+                "delivery": delivery,
                 "recipients": external,
-                "via_forward": bool(on_file and on_file != account),
+                "via_forward": delivery == "forward",
                 "decision": decided.get(email, "pending"),
                 "protected": email in protected_senders or _domain(email) in protected_domains,
             }
@@ -212,6 +298,21 @@ def run(
 
     subscriptions = [s for s in senders if s["has_unsubscribe"] or s["bulk"]]
     subscriptions.sort(key=lambda s: (s["last_seen"] or ""), reverse=True)
+
+    # Spam is scored over ALL probed senders, not just ones with list headers -
+    # the worst offenders deliberately omit List-Unsubscribe.
+    throwaway = find_throwaway_domains(senders)
+    for s in senders:
+        s["spam_signals"] = spam_signals(s, throwaway)
+        s["spam_score"] = spam_score(s["spam_signals"])
+    suspected_spam = [
+        s
+        for s in senders
+        if s["spam_score"] >= SPAM_THRESHOLD
+        and not s["protected"]
+        and s["decision"] == "pending"
+    ]
+    suspected_spam.sort(key=lambda s: (-s["spam_score"], -s["count"]))
 
     result = {
         "generated_at": config.iso(config.utcnow()),
@@ -222,6 +323,8 @@ def run(
         "probed": len(senders),
         "subscriptions": subscriptions,
         "forwarded_subscriptions": [s for s in subscriptions if s["via_forward"]],
+        "alias_subscriptions": [s for s in subscriptions if s["delivery"] == "alias"],
+        "suspected_spam": suspected_spam,
         "undecided_subscriptions": [
             s for s in subscriptions if s["decision"] == "pending" and not s["protected"]
         ],
@@ -265,9 +368,18 @@ def summarize(result: dict) -> None:
                 f"{'yes' if s['has_unsubscribe'] else 'no':7}  {s['address']}"
             )
 
+    spam = result.get("suspected_spam") or []
+    if spam:
+        print()
+        print(f"Suspected spam ({len(spam)}) - flagged only, nothing deleted on this evidence:")
+        for s in spam[:20]:
+            print(f"  score {s['spam_score']}  {s['count']:>3} msgs  {s['address']}")
+            print(f"        {', '.join(s['spam_signals'])}")
+        if len(spam) > 20:
+            print(f"  ... and {len(spam) - 20} more")
+
     print()
     print(f"full detail -> {config.DEEP_SCAN_PATH}")
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(

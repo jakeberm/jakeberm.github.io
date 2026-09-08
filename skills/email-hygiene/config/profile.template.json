@@ -4,7 +4,9 @@
   "account": {
     "email": "",
     "client_id": "",
-    "authority": "https://login.microsoftonline.com/consumers"
+    "authority": "https://login.microsoftonline.com/consumers",
+    "$aliases_comment": "Other addresses that deliver into THIS mailbox (Outlook.com aliases). Mail addressed to these is direct, not forwarded, so deep_scan will not flag it as an external subscription.",
+    "aliases": []
   },
 
   "folders": {

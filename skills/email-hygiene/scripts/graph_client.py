@@ -213,6 +213,10 @@ class GraphClient:
     def mark_read(self, message_id: str, is_read: bool = True) -> dict:
         return self.patch(f"/me/messages/{quote(message_id)}", {"isRead": is_read})
 
+    def delete_message(self, message_id: str) -> None:
+        """Permanently remove a message. Prefer move_message to Deleted Items."""
+        self.delete(f"/me/messages/{quote(message_id)}")
+
     def send_mail(self, to_address: str, subject: str, html_body: str) -> None:
         self.post(
             "/me/sendMail",
