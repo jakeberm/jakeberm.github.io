@@ -1,0 +1,59 @@
+{
+  "$comment": "Copy to ~/.email-hygiene/profile.json and customize. NEVER commit the filled-in copy.",
+
+  "account": {
+    "email": "",
+    "client_id": "",
+    "authority": "https://login.microsoftonline.com/consumers",
+    "$aliases_comment": "Other addresses that deliver into THIS mailbox (Outlook.com aliases). Mail addressed to these is direct, not forwarded, so deep_scan will not flag it as an external subscription.",
+    "aliases": []
+  },
+
+  "folders": {
+    "noise": "Hygiene - Noise",
+    "newsletters": "Hygiene - Newsletters",
+    "review": "Hygiene - Review"
+  },
+
+  "analysis": {
+    "lookback_days": 90,
+    "max_messages": 5000,
+    "min_messages_for_candidate": 5,
+    "max_read_rate_for_candidate": 0.25,
+    "scan_folders": ["inbox", "archive"]
+  },
+
+  "cleanup": {
+    "enabled": true,
+    "max_actions_per_run": 300,
+    "mark_noise_as_read": true,
+    "$routes_comment": "Route wanted-but-noisy senders to their own folder. Still subscribed, just filed. Folder may be nested, e.g. 'Inbox/GitHub'.",
+    "routes": [],
+    "noise_senders": [],
+    "noise_domains": [],
+    "noise_subject_patterns": [],
+    "protected_senders": [],
+    "protected_domains": [],
+    "archive_read_newsletters_after_days": 14
+  },
+
+  "purge": {
+    "$comment": "Ongoing deletion of aged mail from senders you already rejected. Runs before cleanup, so noise is deleted rather than filed. Never permanent: mail goes to Deleted Items, recoverable for 30 days.",
+    "enabled": false,
+    "older_than_days": 30,
+    "folders": ["inbox", "junkemail", "archive"],
+    "max_per_run": 200
+  },
+
+  "rules": {
+    "enabled": true,
+    "prefix": "[Hygiene] ",
+    "max_senders_per_rule": 40
+  },
+
+  "report": {
+    "email_digest": true,
+    "digest_subject": "Inbox hygiene report",
+    "keep_reports": 30
+  }
+}
