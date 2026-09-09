@@ -105,6 +105,12 @@ notices all use promotional-sounding language. Read a group before accepting it,
 to override a handful by hand. Anything with no clear signal is left `pending` rather than
 guessed at.
 
+**Judge a sender by its subject lines, not its subdomain.** It is tempting to read
+`eml.`, `em.`, `info.` or `promomail.` as marketing streams and `itxn.` as transactional,
+but plenty of retailers send order confirmations, shipping notices and return receipts from
+exactly the subdomain that looks promotional. `sample_subjects` in the scan snapshot settles
+it in a second, and getting this wrong files real receipts as junk.
+
 ## Unsubscribing
 
 `unsubscribe.py` is the only module that contacts anyone outside the mailbox, so it is narrow
@@ -120,13 +126,21 @@ Bare links are never fetched. RFC 8058 requires a one-click endpoint to be safe 
 without confirmation; an ordinary link carries no such guarantee, and a blind GET can confirm
 to a spammer that the address is live. That distinction is the whole reason for the split.
 
+**Senders the deep scan flagged as spam get no automatic contact at all** — one-click is
+downgraded to manual and mailto is refused. These headers are written by the sender, so a
+spammer can simply assert one-click compliance to farm a confirmation POST out of you.
+The opt-out hostname can't be used to catch that, because legitimate senders route opt-outs
+through ESPs on unrelated domains (`unsub.apple.com`, `manage.kmail-lists.com`,
+`links.iterable.com`) — so sender reputation is the signal that actually separates them.
+Block flagged senders rather than opting out.
+
 Results are recorded in `unsubscribes.json`, so re-running won't re-send. Use `--retry` to
 force another attempt.
 
 Note that opting out is not the same as deleting: `unsubscribe.py` stops future mail, and
 `purge.py` clears what already arrived.
 
-
+## How senders are scored
 
 `analyze.py` aggregates every message in the scan window by sender, then computes a 0–100
 unsubscribe score from four signals:
