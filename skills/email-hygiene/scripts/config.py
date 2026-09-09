@@ -69,6 +69,25 @@ def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def domain_matches(domain: str, blocklist) -> bool:
+    """True if `domain` is in the blocklist, or is a subdomain of an entry.
+
+    Spam operators rent a domain and then rotate a fresh subdomain per send, so
+    an exact match ages out almost immediately. The server-side rules use
+    Graph's `senderContains`, which is substring-based and already behaves this
+    way; matching on suffix here keeps the local sweep from disagreeing with the
+    rules it just wrote.
+    """
+    domain = (domain or "").lower().lstrip("@")
+    if not domain:
+        return False
+    for entry in blocklist:
+        entry = (entry or "").lower().lstrip("@")
+        if entry and (domain == entry or domain.endswith("." + entry)):
+            return True
+    return False
+
+
 def ensure_dirs() -> None:
     for d in (APP_DIR, REPORT_DIR, LOG_DIR):
         d.mkdir(parents=True, exist_ok=True)

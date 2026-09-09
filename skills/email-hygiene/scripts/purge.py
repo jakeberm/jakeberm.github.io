@@ -83,14 +83,14 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders,
 
             if decision in SPARED:
                 continue
-            if email in protected_senders or domain in protected_domains:
+            if email in protected_senders or config.domain_matches(domain, protected_domains):
                 continue
             if email in routed:
                 continue
 
             if decision in REJECTED:
                 reason = f"decided:{decision}"
-            elif email in noise_senders or domain in noise_domains:
+            elif email in noise_senders or config.domain_matches(domain, noise_domains):
                 reason = "noise-list"
             elif junk_id and message.get("parentFolderId") == junk_id:
                 reason = "in-junk"
