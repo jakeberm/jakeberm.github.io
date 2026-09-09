@@ -153,6 +153,38 @@ def execute(client: GraphClient, actions: list[dict], purge: bool) -> dict:
     return counts
 
 
+def run(apply: bool = False, interactive: bool = True) -> dict:
+    """Scheduled-job entry point. Honours the profile's `purge` block.
+
+    Disabled by default: deleting mail should be something you turn on
+    deliberately, not something that starts happening because you installed
+    the skill. Always recoverable - never permanent from here.
+    """
+    profile = config.load_profile()
+    settings = profile.get("purge", {})
+    if not settings.get("enabled", False):
+        print("Purge: disabled in profile (purge.enabled = false)")
+        return {"deleted": 0, "errors": 0, "skipped": True}
+
+    client = GraphClient(profile, interactive=interactive)
+    older_than = settings.get("older_than_days", 30)
+    folders = settings.get("folders", list(DEFAULT_FOLDERS))
+    limit = settings.get("max_per_run", 200)
+
+    actions = plan(client, profile, older_than, folders, None, limit)
+    mode = "APPLY" if apply else "DRY RUN"
+    print(f"Purge [{mode}]: older than {older_than}d -> Deleted Items")
+    summarize(actions)
+
+    if not apply or not actions:
+        return {"deleted": 0, "errors": 0, "eligible": len(actions)}
+
+    counts = execute(client, actions, purge=False)
+    counts["eligible"] = len(actions)
+    config.audit("purge_run", purge=False, older_than=older_than, **counts)
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Delete aged mail from rejected senders (dry run by default)."

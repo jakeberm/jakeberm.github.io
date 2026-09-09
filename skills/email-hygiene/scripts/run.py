@@ -14,6 +14,7 @@ import traceback
 import analyze
 import cleanup
 import config
+import purge
 import report
 import rules_sync
 from graph_client import GraphClient, GraphError
@@ -25,6 +26,16 @@ def run(apply: bool, interactive: bool, skip_email: bool = False) -> int:
     print(f"=== email-hygiene {'APPLY' if apply else 'DRY RUN'} — {config.iso(started)} ===")
 
     analysis = analyze.analyze(interactive=interactive)
+
+    # Purge runs before cleanup deliberately. Cleanup files noise into its own
+    # folder, which purge doesn't scan, so the other order would quietly
+    # protect the very mail we mean to age out.
+    print()
+    try:
+        purge_summary = purge.run(apply=apply, interactive=interactive)
+    except GraphError as exc:
+        print(f"  ! purge failed: {exc}", file=sys.stderr)
+        purge_summary = {"deleted": 0, "errors": 0, "error": str(exc)}
 
     print()
     cleanup_summary = cleanup.run(apply=apply, interactive=interactive)
@@ -63,6 +74,7 @@ def run(apply: bool, interactive: bool, skip_email: bool = False) -> int:
         mode=state["last_mode"],
         candidates=state["last_candidates"],
         filed=cleanup_summary.get("moved", 0) + cleanup_summary.get("archived", 0),
+        deleted=purge_summary.get("deleted", 0),
     )
     return 0
 

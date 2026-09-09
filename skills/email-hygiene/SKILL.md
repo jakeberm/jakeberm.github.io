@@ -243,6 +243,19 @@ the address that list actually has.
 The task runs `run.py --apply --non-interactive`. Non-interactive mode never prompts — it fails
 if the cached refresh token has expired, so re-run `auth.py login` if the digest stops arriving.
 
+Each run does, in order: analyze → purge → cleanup → rules sync → report.
+
+Purge runs **before** cleanup on purpose. Cleanup moves noise into its own folder, which purge
+doesn't scan, so the opposite order would quietly protect the very mail meant to age out.
+
+Ongoing deletion is off until you set `purge.enabled` to `true`. Mail is only ever moved to
+Deleted Items by the scheduled job — permanent removal needs `--purge` by hand, which the task
+never passes.
+
+The script refuses to register from a git worktree, and resolves to the main checkout instead.
+A worktree is temporary, so a task pointing into one works until the worktree is removed and
+then fails silently — the worst kind of scheduled-job failure. Use `-AllowWorktree` to override.
+
 ## Profile reference
 
 See `config/profile.template.json`. The keys you'll actually tune:

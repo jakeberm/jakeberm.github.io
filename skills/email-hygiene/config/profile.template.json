@@ -37,6 +37,14 @@
     "archive_read_newsletters_after_days": 14
   },
 
+  "purge": {
+    "$comment": "Ongoing deletion of aged mail from senders you already rejected. Runs before cleanup, so noise is deleted rather than filed. Never permanent: mail goes to Deleted Items, recoverable for 30 days.",
+    "enabled": false,
+    "older_than_days": 30,
+    "folders": ["inbox", "junkemail", "archive"],
+    "max_per_run": 200
+  },
+
   "rules": {
     "enabled": true,
     "prefix": "[Hygiene] ",

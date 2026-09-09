@@ -14,6 +14,7 @@ param(
     [string]$Frequency = "Daily",
     [string]$TaskName = "EmailHygiene",
     [switch]$DryRun,
+    [switch]$AllowWorktree,
     [switch]$Unregister
 )
 
@@ -30,6 +31,42 @@ if ($Unregister) {
 }
 
 $scriptRoot = Split-Path -Parent $PSScriptRoot
+
+# A git worktree is temporary. Registering a task that points into one produces
+# a job that works today and silently stops working when the worktree is
+# removed, so resolve to the main checkout instead.
+$gitDir = Join-Path $scriptRoot ".git"
+$repoRoot = $scriptRoot
+while ($repoRoot -and -not (Test-Path (Join-Path $repoRoot ".git"))) {
+    $parent = Split-Path -Parent $repoRoot
+    if ($parent -eq $repoRoot) { break }
+    $repoRoot = $parent
+}
+
+if ($repoRoot -and (Test-Path (Join-Path $repoRoot ".git")) -and -not $AllowWorktree) {
+    $gitPath = Join-Path $repoRoot ".git"
+    # In a worktree, .git is a file pointing elsewhere; in a normal clone it's a directory.
+    if (-not (Get-Item $gitPath -Force).PSIsContainer) {
+        $mainCheckout = (git -C $repoRoot worktree list |
+            Select-Object -First 1) -replace '\s.*$', ''
+        $mainCheckout = $mainCheckout -replace '/', '\'
+        $relative = $scriptRoot.Substring($repoRoot.Length).TrimStart('\')
+        $candidate = Join-Path $mainCheckout $relative
+
+        Write-Warning "This is a git worktree, which is temporary."
+        if (Test-Path (Join-Path $candidate "scripts\run.py")) {
+            Write-Host "Using the main checkout instead: $candidate"
+            $scriptRoot = $candidate
+        } else {
+            Write-Warning "The main checkout doesn't have this skill yet:"
+            Write-Warning "  $candidate"
+            Write-Warning "Merge the branch first, then re-run this script."
+            Write-Warning "To register against the worktree anyway, pass -AllowWorktree."
+            throw "Refusing to register a task that will break when the worktree is removed."
+        }
+    }
+}
+
 $runner = Join-Path $scriptRoot "scripts\run.py"
 if (-not (Test-Path $runner)) { throw "Cannot find run.py at $runner" }
 
