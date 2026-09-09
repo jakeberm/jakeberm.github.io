@@ -100,7 +100,10 @@ class GraphClient:
         return list(
             self.paged(
                 "/me/mailFolders",
-                params={"$top": 100, "$select": "id,displayName,parentFolderId"},
+                params={
+                    "$top": 100,
+                    "$select": "id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount",
+                },
             )
         )
 
@@ -119,7 +122,10 @@ class GraphClient:
         return list(
             self.paged(
                 f"/me/mailFolders/{quote(parent_id)}/childFolders",
-                params={"$top": 100, "$select": "id,displayName"},
+                params={
+                    "$top": 100,
+                    "$select": "id,displayName,totalItemCount,unreadItemCount,childFolderCount",
+                },
             )
         )
 

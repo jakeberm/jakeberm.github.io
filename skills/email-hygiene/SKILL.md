@@ -229,16 +229,29 @@ so a Gmail integration needs a Desktop-app OAuth client, and its consent screen 
 ## Deleting old mail
 
 ```powershell
-python scripts\purge.py                      # dry run
-python scripts\purge.py --apply              # -> Deleted Items, recoverable
-python scripts\purge.py --apply --purge      # permanent
-python scripts\purge.py --older-than 60      # widen the grace period
+python scripts\purge.py                          # dry run, 30-day grace
+python scripts\purge.py --apply                  # -> Deleted Items, recoverable
+python scripts\purge.py --apply --purge          # permanent
+python scripts\purge.py --older-than 60          # widen the grace period
+python scripts\purge.py --lookback-days 4000     # reach back past the default year
 ```
 
 Eligibility is deliberately deterministic — a message is only touched when its sender has a
 `unsubscribe`/`block` decision, is on the noise lists, or the message is in Junk, **and** it is
-older than the grace period. Run `purge.py` *before* `cleanup.py`: cleanup files noise into the
-Hygiene folder, which purge does not scan.
+older than the grace period.
+
+Two windows control the sweep, and they are independent:
+
+- `--older-than` is the **grace period**: mail newer than this is spared, so an unsubscribe
+  confirmation that just arrived is never swept away. This is also why a sweep straight after
+  unsubscribing looks like it found almost nothing — the backlog is all inside the grace window.
+- `--lookback-days` is **how far back to search**. It defaults to 6× the grace period with a
+  floor of one year, so a default run cannot see mail older than 12 months however the grace
+  period is set. Raise it for a one-off history sweep.
+
+`Hygiene - Noise` is in the default folder list, because `cleanup.py` runs first and files
+rejected senders' mail there — leaving it out would hide most of what purge exists to remove
+behind the previous step's own tidying.
 
 ## The decision loop
 

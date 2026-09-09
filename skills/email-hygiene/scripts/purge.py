@@ -29,7 +29,10 @@ SELECT = ("id", "receivedDateTime", "isRead", "subject", "from", "parentFolderId
 
 # Junk is included because mail that lands there is spam by the server's own
 # judgement, which is a stronger signal than anything this skill computes.
-DEFAULT_FOLDERS = ("inbox", "junkemail", "archive")
+# The noise folder is included because cleanup.py runs first and files rejected
+# senders' mail there - leaving it out would hide most of what purge exists to
+# remove behind the previous step's own tidying.
+DEFAULT_FOLDERS = ("inbox", "junkemail", "archive", "Hygiene - Noise")
 REJECTED = {"unsubscribe", "block"}
 SPARED = {"keep", "route", "protect"}
 
@@ -42,7 +45,8 @@ def _decisions() -> dict[str, str]:
 
 
 def plan(client: GraphClient, profile: dict, older_than_days: int, folders,
-         only_senders: set[str] | None = None, limit: int | None = None) -> list[dict]:
+         only_senders: set[str] | None = None, limit: int | None = None,
+         lookback_days: int | None = None) -> list[dict]:
     cleanup = profile["cleanup"]
     protected_senders = {s.lower() for s in cleanup.get("protected_senders", [])}
     protected_domains = {d.lower() for d in cleanup.get("protected_domains", [])}
@@ -53,8 +57,11 @@ def plan(client: GraphClient, profile: dict, older_than_days: int, folders,
     cap = limit or cleanup["max_actions_per_run"]
 
     cutoff = config.iso(config.utcnow() - timedelta(days=older_than_days))
-    # Look back well past the cutoff so old mail is actually reachable.
-    since = config.iso(config.utcnow() - timedelta(days=max(older_than_days * 6, 365)))
+    # How far back to *search*, as opposed to how recent mail is spared. These
+    # are independent: a 30-day grace period says nothing about whether you want
+    # to reach back one year or ten. Default keeps the old behaviour.
+    window = lookback_days if lookback_days is not None else max(older_than_days * 6, 365)
+    since = config.iso(config.utcnow() - timedelta(days=window))
 
     junk_id = client.resolve_folder_id("junkemail")
     actions: list[dict] = []
@@ -170,8 +177,9 @@ def run(apply: bool = False, interactive: bool = True) -> dict:
     older_than = settings.get("older_than_days", 30)
     folders = settings.get("folders", list(DEFAULT_FOLDERS))
     limit = settings.get("max_per_run", 200)
+    lookback = settings.get("lookback_days")
 
-    actions = plan(client, profile, older_than, folders, None, limit)
+    actions = plan(client, profile, older_than, folders, None, limit, lookback)
     mode = "APPLY" if apply else "DRY RUN"
     print(f"Purge [{mode}]: older than {older_than}d -> Deleted Items")
     summarize(actions)
@@ -202,6 +210,12 @@ def main() -> int:
         help="grace period in days; newer mail is never touched (default 30)",
     )
     parser.add_argument("--folders", nargs="+", default=list(DEFAULT_FOLDERS))
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        help="how far back to search (default: 6x the grace period, min 365). "
+             "Raise this to sweep mail older than a year.",
+    )
     parser.add_argument(
         "--senders",
         nargs="+",
@@ -239,11 +253,12 @@ def main() -> int:
     client = GraphClient(profile)
     mode = "PURGE (permanent)" if args.purge else "delete -> Deleted Items (recoverable)"
     scope = f" | {len(only_senders)} sender(s)" if only_senders else ""
-    print(f"purge plan: older than {args.older_than}d | mode: {mode}{scope}")
+    window = args.lookback_days if args.lookback_days is not None else max(args.older_than * 6, 365)
+    print(f"purge plan: older than {args.older_than}d | searching back {window}d | mode: {mode}{scope}")
 
     try:
         actions = plan(client, profile, args.older_than, args.folders,
-                       only_senders, args.limit)
+                       only_senders, args.limit, args.lookback_days)
     except GraphError as exc:
         print(f"graph error: {exc}", file=sys.stderr)
         return 1
