@@ -191,6 +191,27 @@ Senders scoring ≥ 4 land in `suspected_spam`. **This only flags.** Nothing is 
 evidence alone — promote a sender with `decide.py set <addr> block` and `purge.py` picks it up
 on the next run.
 
+### Mail forwarded from another account
+
+`deep_scan.py` reports which address each list is actually registered to. When that isn't this
+mailbox, the mail is arriving via a forward, and a local rule would hide it forever without
+ever unsubscribing you.
+
+**You can usually still opt out anyway.** A forwarded message keeps its original
+`List-Unsubscribe` header, and the opt-out token identifies the *original* subscriber — so
+POSTing to it unsubscribes the other address, not this one. `unsubscribe.py` needs no access to
+the other account for this to work.
+
+Senders with no `List-Unsubscribe` header at all are usually **transactional**, not spam:
+receipts, security alerts, shipping updates, booking changes. Bulk-mail opt-out conventions
+don't apply to them, which is exactly why they carry no header. Decide these `keep` or route
+them — a missing opt-out header is not evidence of spam.
+
+Authenticating directly against the other provider is only worth it to clean that mailbox, or
+to find lists that *aren't* forwarded. Note that Google's device-code flow rejects Gmail scopes,
+so a Gmail integration needs a Desktop-app OAuth client, and its consent screen must be set to
+"In production" or refresh tokens expire after 7 days and quietly break any scheduled job.
+
 ## Deleting old mail
 
 ```powershell
