@@ -177,7 +177,7 @@ def analyze(interactive: bool = True) -> dict:
             "last_seen": entry["last_seen"],
             "folders": sorted(entry["folders"]),
             "sample_message_id": entry["sample_message_id"],
-            "protected": email in protected_senders or _domain(email) in protected_domains,
+            "protected": email in protected_senders or config.domain_matches(_domain(email), protected_domains),
         }
         senders.append(record)
 

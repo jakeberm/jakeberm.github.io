@@ -17,6 +17,13 @@ Three mechanisms, in order of preference:
      GET on an arbitrary link can do anything, including confirming an address
      to a spammer.
 
+A sender the deep scan flagged as suspected spam never gets an automatic POST,
+even when it advertises one-click. The headers are supplied by the sender, so a
+spammer can simply assert RFC 8058 compliance to get a live-address
+confirmation out of us. Legitimate senders route opt-outs through ESPs on
+unrelated domains, so the opt-out hostname can't be used to tell the two apart -
+the sender's own reputation is the usable signal.
+
 Results are recorded so a second run doesn't re-send anything.
 """
 
@@ -48,7 +55,16 @@ def _header(headers: list[dict], name: str) -> str:
     return ""
 
 
-def discover(client: GraphClient, address: str) -> dict:
+def flagged_spam_senders() -> set[str]:
+    """Addresses the last deep scan scored as suspected spam."""
+    scan = config.load_json(config.DEEP_SCAN_PATH, None)
+    if not scan:
+        return set()
+    return {s["address"].lower() for s in scan.get("suspected_spam", [])}
+
+
+def discover(client: GraphClient, address: str,
+             spam: set[str] | None = None) -> dict:
     """Work out how (or whether) we can unsubscribe from one sender."""
     try:
         message = client.newest_message_from(address)
@@ -70,6 +86,17 @@ def discover(client: GraphClient, address: str) -> dict:
     urls = URL_RE.findall(raw)
     mailtos = MAILTO_RE.findall(raw)
     https = next((u for u in urls if u.lower().startswith("https://")), None)
+
+    # Every route below tells the sender the address is real. That is a fair
+    # trade for a list you actually joined, and a bad one for a spammer who is
+    # fishing for confirmation, so flagged senders get no automatic contact at
+    # all - block them instead.
+    if spam and address.lower() in spam:
+        detail = "sender flagged as spam - not contacting; block instead"
+        if https or urls:
+            return {"address": address, "method": "manual", "url": https or urls[0],
+                    "detail": detail}
+        return {"address": address, "method": "none", "detail": detail}
 
     # One-click is only valid over HTTPS; the RFC requires TLS.
     if post.lower().replace(" ", "") == "list-unsubscribe=one-click" and https:
@@ -166,7 +193,8 @@ def main() -> int:
     client = GraphClient(profile)
     print(f"discovering opt-out method for {len(addresses)} sender(s)...\n")
 
-    plans = [discover(client, a) for a in addresses]
+    spam = flagged_spam_senders()
+    plans = [discover(client, a, spam) for a in addresses]
     buckets: dict[str, list] = {"one-click": [], "mailto": [], "manual": [], "none": []}
     for p in plans:
         buckets[p["method"]].append(p)

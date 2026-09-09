@@ -292,7 +292,7 @@ def run(
                 "recipients": external,
                 "via_forward": delivery == "forward",
                 "decision": decided.get(email, "pending"),
-                "protected": email in protected_senders or _domain(email) in protected_domains,
+                "protected": email in protected_senders or config.domain_matches(_domain(email), protected_domains),
             }
         )
 

@@ -95,7 +95,7 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
             break
         address = _sender_address(message)
         domain = _domain(address)
-        if address in protected_senders or domain in protected_domains:
+        if address in protected_senders or config.domain_matches(domain, protected_domains):
             continue
 
         subject = message.get("subject") or ""
@@ -119,7 +119,7 @@ def plan(client: GraphClient, profile: dict) -> list[dict]:
         reason = None
         if address in noise_senders:
             reason = "noise sender"
-        elif domain in noise_domains:
+        elif config.domain_matches(domain, noise_domains):
             reason = "noise domain"
         elif any(p.search(subject) for p in subject_patterns):
             reason = "noise subject"
